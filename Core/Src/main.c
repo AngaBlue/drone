@@ -60,26 +60,89 @@ static void MX_SPI1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define WHO_AM_I_REG    0x75    /* Bank 0, ICM-42688-P */
-#define READ_FLAG       0x80    /* SPI address bit 7: 1 = read */
+#define WHO_AM_I_REG     0x75    /* Bank 0, ICM-42688-P */
+#define TEMP_DATA1_REG   0x1D    /* TEMP_DATA[15:8] */
+#define PWR_MGMT0_REG    0x4E
+#define READ_FLAG        0x80    /* SPI address bit 7: 1 = read */
+#define PWR_MGMT0_ACCEL_LN  0x03 /* accel LN; temp sensor stays enabled (TEMP_DIS=0) */
+#define ICM_SPI_TIMEOUT_MS  20U
 
-uint8_t readWhoAmI(void) {
-    uint8_t txData[2];
-    uint8_t rxData[2] = {0};
+static HAL_StatusTypeDef icm_xfer(uint8_t *tx, uint8_t *rx, uint16_t len)
+{
+  HAL_GPIO_WritePin(SPI1_CS_GPIO_Port, SPI1_CS_Pin, GPIO_PIN_RESET);
+  HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(&hspi1, tx, rx, len, ICM_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(SPI1_CS_GPIO_Port, SPI1_CS_Pin, GPIO_PIN_SET);
 
-    HAL_GPIO_WritePin(SPI1_CS_GPIO_Port, SPI1_CS_Pin, GPIO_PIN_RESET);
-
-    txData[0] = WHO_AM_I_REG | READ_FLAG;
-    txData[1] = 0x00;
-    if (HAL_SPI_TransmitReceive(&hspi1, txData, rxData, 2, HAL_MAX_DELAY) != HAL_OK)
-    {
-      HAL_GPIO_WritePin(SPI1_CS_GPIO_Port, SPI1_CS_Pin, GPIO_PIN_SET);
-      return 0xFF;
-    }
-
+  if (status != HAL_OK)
+  {
+    HAL_SPI_Abort(&hspi1);
     HAL_GPIO_WritePin(SPI1_CS_GPIO_Port, SPI1_CS_Pin, GPIO_PIN_SET);
+  }
+  return status;
+}
 
-    return rxData[1];
+static HAL_StatusTypeDef icm_write(uint8_t reg, uint8_t value)
+{
+  uint8_t tx[2] = {reg, value};
+  uint8_t rx[2] = {0};
+  return icm_xfer(tx, rx, 2);
+}
+
+static HAL_StatusTypeDef icm_read(uint8_t start_reg, uint8_t *data, uint16_t len)
+{
+  uint8_t tx[3] = {0};
+  uint8_t rx[3] = {0};
+
+  if ((len == 0U) || (len > 2U))
+  {
+    return HAL_ERROR;
+  }
+
+  tx[0] = start_reg | READ_FLAG;
+  HAL_StatusTypeDef status = icm_xfer(tx, rx, (uint16_t)(len + 1U));
+  if (status == HAL_OK)
+  {
+    for (uint16_t i = 0; i < len; i++)
+    {
+      data[i] = rx[i + 1U];
+    }
+  }
+  return status;
+}
+
+uint8_t readWhoAmI(void)
+{
+  uint8_t who = 0xFF;
+  if (icm_read(WHO_AM_I_REG, &who, 1) != HAL_OK)
+  {
+    return 0xFF;
+  }
+  return who;
+}
+
+HAL_StatusTypeDef icm_wake_for_temp(void)
+{
+  HAL_StatusTypeDef status = icm_write(PWR_MGMT0_REG, PWR_MGMT0_ACCEL_LN);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+  HAL_Delay(1);  /* >= 200 us after leaving OFF before further writes */
+  HAL_Delay(15); /* first sample at 1 kHz ODR + temp sensor settle */
+  return HAL_OK;
+}
+
+float readTemp(void)
+{
+  uint8_t raw[2] = {0};
+
+  if (icm_read(TEMP_DATA1_REG, raw, 2) != HAL_OK)
+  {
+    return 0.0f;
+  }
+
+  int16_t temp_data = (int16_t)(((uint16_t)raw[0] << 8) | raw[1]);
+  return ((float)temp_data / 132.48f) + 25.0f;
 }
 /* USER CODE END 0 */
 
@@ -137,17 +200,23 @@ int main(void)
   }
 
   /* USER CODE BEGIN BSP */
+  printf("Starting...\r\n");
 
-  /* -- Sample board code to send message over COM1 port ---- */
-  printf("Welcome to STM32 world !\r\n");
-  uint8_t whoAmI = readWhoAmI();
-  printf("Who am I? 0x%02X (expect 0x47)\r\n", whoAmI);
-
-
-  /* -- Sample board code to switch on leds ---- */
   BSP_LED_On(LED_GREEN);
   BSP_LED_On(LED_YELLOW);
   BSP_LED_On(LED_RED);
+
+  uint8_t whoAmI = readWhoAmI();
+  if (whoAmI == 0x47) {
+	  printf("IMU Init Success \r\n");
+  } else {
+	  printf("IMU Init Failed.  WHO_AM_I got 0x%02X\r\n", whoAmI);
+  }
+
+  if (icm_wake_for_temp() != HAL_OK)
+  {
+    printf("IMU wake failed\r\n");
+  }
 
   /* USER CODE END BSP */
 
@@ -168,6 +237,7 @@ int main(void)
 
       /* ..... Perform your action ..... */
     }
+    printf("Temp: %.1f\r\n", readTemp());
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
