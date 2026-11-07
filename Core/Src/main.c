@@ -64,7 +64,7 @@ static void MX_SPI1_Init(void);
 #define TEMP_DATA1_REG   0x1D    /* TEMP_DATA[15:8] */
 #define PWR_MGMT0_REG    0x4E
 #define READ_FLAG        0x80    /* SPI address bit 7: 1 = read */
-#define PWR_MGMT0_ACCEL_LN  0x03 /* accel LN; temp sensor stays enabled (TEMP_DIS=0) */
+#define PWR_MGMT0_ACCEL_GYRO_LN  0x0F /* gyro LN | accel LN; TEMP_DIS=0 */
 #define ICM_SPI_TIMEOUT_MS  20U
 
 static HAL_StatusTypeDef icm_xfer(uint8_t *tx, uint8_t *rx, uint16_t len)
@@ -90,10 +90,10 @@ static HAL_StatusTypeDef icm_write(uint8_t reg, uint8_t value)
 
 static HAL_StatusTypeDef icm_read(uint8_t start_reg, uint8_t *data, uint16_t len)
 {
-  uint8_t tx[3] = {0};
-  uint8_t rx[3] = {0};
+  uint8_t tx[17] = {0};
+  uint8_t rx[17] = {0};
 
-  if ((len == 0U) || (len > 2U))
+  if ((len == 0U) || (len > 16U))
   {
     return HAL_ERROR;
   }
@@ -122,13 +122,13 @@ uint8_t readWhoAmI(void)
 
 HAL_StatusTypeDef icm_wake_for_temp(void)
 {
-  HAL_StatusTypeDef status = icm_write(PWR_MGMT0_REG, PWR_MGMT0_ACCEL_LN);
+  HAL_StatusTypeDef status = icm_write(PWR_MGMT0_REG, PWR_MGMT0_ACCEL_GYRO_LN);
   if (status != HAL_OK)
   {
     return status;
   }
   HAL_Delay(1);  /* >= 200 us after leaving OFF before further writes */
-  HAL_Delay(15); /* first sample at 1 kHz ODR + temp sensor settle */
+  HAL_Delay(45); /* gyro must stay ON >= 45 ms before it is reliable */
   return HAL_OK;
 }
 
@@ -145,6 +145,55 @@ float readTemp(void)
   return ((float)temp_data / 132.48f) + 25.0f;
 }
 /* USER CODE END 0 */
+
+typedef struct VecFloat{
+	float x, y, z;
+} VecFloat;
+
+
+typedef struct {
+	float temp;
+	VecFloat accel;
+	VecFloat gyro;
+	int16_t timestamp;
+} IMUReading;
+
+int16_t be16(uint8_t* raw)
+{
+	return (int16_t)((uint16_t)raw[0] << 8) | raw[1];
+}
+
+float accel(uint8_t* raw)
+{
+	return (float)be16(raw) / 2048.0f * 9.81f;
+}
+
+float gyro(uint8_t* raw)
+{
+	return (float)be16(raw) / 16.4f;
+}
+
+IMUReading readIMU(void)
+{
+	  uint8_t raw[16];
+	  IMUReading reading = {0};
+
+	  if (icm_read(TEMP_DATA1_REG, raw, 16) != HAL_OK)
+	  {
+	    return reading;
+	  }
+
+	  reading.temp = ((float)be16(raw) / 132.48f) + 25.0f;
+	  reading.accel.x = accel(raw + 2);
+	  reading.accel.y = accel(raw + 4);
+	  reading.accel.z = accel(raw + 6);
+	  reading.gyro.x = gyro(raw + 8);
+	  reading.gyro.y = gyro(raw + 10);
+	  reading.gyro.z = gyro(raw + 12);
+	  reading.timestamp = be16(raw + 14);
+	  return reading;
+}
+
 
 /**
   * @brief  The application entry point.
@@ -237,7 +286,11 @@ int main(void)
 
       /* ..... Perform your action ..... */
     }
-    printf("Temp: %.1f\r\n", readTemp());
+    IMUReading reading = readIMU();
+    printf("Temp  %.1f\r\n", reading.temp);
+    printf("Accel [%.3f, %.3f, %.3f]\r\n", reading.accel.x, reading.accel.y, reading.accel.z);
+    printf("Gyro  [%.3f, %.3f, %.3f]\r\n", reading.gyro.x, reading.gyro.y, reading.gyro.z);
+    printf("Time  %u\r\n", reading.timestamp);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
